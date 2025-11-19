@@ -1,0 +1,342 @@
+---
+title: "Untitled"
+author: "Kathleen"
+date: "2025-06-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Install jika belum terpasang
+# Load libraries
+library(StMoMo)
+library(readxl)
+
+# 1. Baca data dari Excel
+nMx_raw <- read_excel("D:/skripsi/nmx_m.xlsx",sheet="Sheet2")  # ganti dengan path lokal
+```
+
+```{r}
+# 2. Ekstrak usia & tahun
+library(dplyr)
+
+# Tentukan tahun awal untuk filter (harus sesuai dengan data Anda)
+START_YEAR_FILTER <- 1950 
+
+# --- Filter baris data (tahun) menjadi interval 5 tahunan ---
+nMx_raw <- nMx_raw %>%
+  filter(
+    # Logika: (Tahun - Tahun Awal) harus habis dibagi 5 (remainder = 0)
+    (Year - START_YEAR_FILTER) %% 5 == 0 
+  )
+year <- nMx_raw$Year       
+years_numeric <- as.numeric(year)# baris = kelompok umur (misal "0-4")
+ages <- colnames(nMx_raw)[-1]  
+ages_numeric <- as.numeric(sub("-.*", "", ages))  # ambil umur bawah (misal 0 dari "0-4")# kolom = tahun
+
+
+nMx_data_only <- as.matrix(nMx_raw[, -1]) 
+
+# B. LAKUKAN TRANSPOSE: Mengubah (74 Tahun x 21 Usia) menjadi (21 Usia x 74 Tahun)
+nMx_matrix <- t(nMx_data_only) 
+
+# --- SEKARANG DIMENSI COCOK: nrow(nMx_matrix) = 21 ---
+rownames(nMx_matrix) <- ages_numeric # Baris (21) cocok dengan ages_numeric (21)
+colnames(nMx_matrix) <- years_numeric # Kolom (74) cocok dengan years_numeric (74)
+
+# C. Pastikan semua isinya di dalam matriks adalah numerik
+nMx_matrix <- apply(nMx_matrix, c(1, 2), as.numeric) 
+
+# 4. Buat exposure dummy (jumlah penduduk hidup) = 1
+E <- matrix(1, nrow = length(ages_numeric), ncol = length(years_numeric),
+            dimnames = list(ages_numeric, years_numeric))
+
+# 5. Hitung jumlah kematian (Dxt = Mx * E)
+Dxt <- nMx_matrix * E
+
+# 6. Buat objek StMoMoData
+data_male <- list(
+  Dxt = Dxt,
+  Ext = E,
+  ages = ages_numeric,
+  years = years_numeric,
+  type = "central"
+)
+class(data_male) <- "StMoMoData"
+```
+
+```{r}
+library(ggplot2)
+# Fit model Lee Carter
+LC_model <- lc(link = "log", const = "sum")
+
+LC_fit_male <- fit(LC_model, data= data_male)
+save(LC_fit_male, file = "D:/skripsi/fit_LC_male.RData")
+
+
+# View summary
+summary(LC_fit_male)
+
+a_x = as.vector(LC_fit_male$ax)
+b_x = as.vector(LC_fit_male$bx)
+k_t = as.vector(LC_fit_male$kt)
+
+a_x
+b_x
+k_t
+residual_deviance <- LC_fit_male$dev 
+n_parameters <- LC_fit_male$npar # Jumlah parameter model (ax, bx, kt, dll.)
+n_data_points <- length(LC_fit_male$Dxt) # Total observasi (X * T)
+
+# 2. Hitung Degrees of Freedom Sisa (DF_res)
+# DF_res = Total Data Points - Total Parameters
+residual_df_manual <- n_data_points - n_parameters 
+
+# 3. Hitung Varians Error (Phi = Sigma Kuadrat)
+phi_estimate_sigma2 <- residual_deviance / residual_df_manual
+
+# 4. Hitung Deviasi Standar (Sigma)
+sigma_error_hat <- sqrt(phi_estimate_sigma2)
+
+cat("=========================================\n")
+cat("ESTIMASI PARAMETER DISTRIBUSI ERROR:\n")
+cat(sprintf("DF Sisa (DF_res): %d\n", residual_df_manual))
+cat(sprintf("Varians (Sigma^2 / Phi): %.4f\n", phi_estimate_sigma2))
+cat(sprintf("Deviasi Standar (Sigma): %.4f\n", sigma_error_hat))
+cat("=========================================\n")
+ages <- LC_fit_male$ages
+years <- LC_fit_male$years
+
+# 1. Plot a_x
+plot(ages, a_x, type = "b", pch = 16, col = "darkgreen",
+     xlab = "Umur", ylab = expression(a[x]),
+     main = "a(x): Rata-rata log mortalitas pada usia")
+
+# 2. Plot b_x
+plot(ages, b_x, type = "b", pch = 16, col = "blue",
+     xlab = "Umur", ylab = expression(b[x]),
+     main = "b(x): Sensitivitas log mortalitas pada waktu")
+
+START_YEAR_TARGET <- 1950
+END_YEAR_TARGET <- 2023   
+
+# --- 1. Cari Indeks Awal dan Akhir ---
+# Gunakan vektor 'years_numeric' yang berisi tahun, bukan 'years' (yang berisi usia)
+index_start <- which(years_numeric == START_YEAR_TARGET)
+index_end <- which(years_numeric == END_YEAR_TARGET)
+
+
+# 3. Buat time series object yang sudah dikoreksi
+kt_ts_corrected <- ts(k_t, start = START_YEAR_TARGET, frequency = 5)
+# 4. Plot ulang grafik
+plot(kt_ts_corrected, 
+     type = "b", 
+     pch = 16, 
+     col = "red",
+     xlab = "Tahun", 
+     ylab = expression(k[t]),
+     main = "k(t): Berubahnya waktu pada indeks mortalita")
+# 1. Ambil vektor sisaan dan bersihkan NA/Inf
+residuals_vector <- as.vector(LC_fit_male$fittingModel$residuals)
+residuals_vector_clean <- residuals_vector[is.finite(residuals_vector)]
+
+# 2. Buat dataframe untuk plotting
+residuals_df <- data.frame(Residuals = residuals_vector_clean)
+
+qq_plot <- ggplot(residuals_df, aes(sample = Residuals)) +
+  # Tambahkan titik kuantil sampel Anda
+  stat_qq() +
+  # Tambahkan garis referensi (wajib untuk menilai Normalitas)
+  stat_qq_line(color = "red", linewidth = 1.2, linetype = "dashed") +
+  
+  labs(
+    title = "Normal Quantile-Quantile (Q-Q) Plot Residual Lee-Carter",
+    subtitle = "Menguji asumsi Normalitas error model",
+    x = "Kuantil Teoritis (Distribusi Normal)",
+    y = "Kuantil Sampel (Residuals)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(qq_plot)
+```
+
+```{r}
+# Load the library
+library(writexl)
+
+# Create Year sequence for k_t
+Year <- years
+
+df1 <- data.frame(a_x, b_x)
+df2 <- data.frame(Year, k_t)
+df1
+df2
+write_xlsx(df1, path = "lee_carter_axbx (female).xlsx")
+write_xlsx(df2, path = "lee_carter_kt (female).xlsx")
+```
+
+
+
+# evaluate fit (Residuals)
+```{r}
+# Plot the fitted parameters
+plot(LC_fit_male)
+
+# Extract residuals (deviance residuals)
+residuals_lc <- residuals(LC_fit_male)
+
+#1. plot histogram
+hist(residuals_lc$residuals, 
+     main = "Histogram of Residuals", 
+     xlab = "Residuals", 
+     col = "lightblue", 
+     border = "black", 
+     breaks = 20)
+
+# 2.  Create a QQ plot of the residuals
+qqnorm(residuals_lc$residuals, 
+       main = "QQ Plot of Residuals", 
+       col = "blue", 
+       pch = 19)  # Create the QQ plot
+
+# Add the reference line for normality
+qqline(residuals_lc$residuals, col = "red", lwd = 2) 
+
+# Kolmogorov-Smirnov test untuk membandingkan residual dengan distribusi normal
+ks_test_result <- ks.test(residuals_lc$residuals, "pnorm", mean = mean(residuals_lc$residuals), sd = sd(residuals_lc$residuals))
+
+# Menampilkan hasil KS test
+print(ks_test_result)
+#p-value = 0.001819 < 0.05 -> not normally distributed
+
+# Plot residuals with different styles
+plot(residuals_lc, type = "colourmap")
+```
+
+```{r}
+library(forecast)
+library(tseries)
+library(TSA)
+
+kt <- ts(k_t)
+plot(kt)
+
+acf(kt) #possible lag 1
+pacf(kt)
+
+adf.test(kt)
+#H0 : not stationary, ha: stationary
+#p-value > 0.05 -> not stationary
+## R Markdown
+
+dkt <- diff(kt)
+adf.test(dkt)
+# pvalue < 0.05 -> stationary
+
+acf(dkt)
+pacf(dkt)
+best_model_auto <- auto.arima(kt, stepwise = FALSE, approximation = FALSE, allowdrift = TRUE)
+
+cat("\n== Hasil auto.arima (Model Terbaik) ==\n")
+print(summary(best_model_auto))
+library(tidyverse)
+library(forecast) # Pastikan dimuat
+
+# --- 1. Tentukan Tahun Proyeksi ---
+# Hitung tahun awal proyeksi (misalnya 2025)
+tahun_awal_proj <- 2020+5 # Gunakan tahun_terakhir + interval waktu
+h_forecast <- 10 
+
+# Jalankan kembali fungsi forecast()
+# Asumsi 'best_model_auto' sudah didefinisikan
+kt_forecast_result <- forecast(best_model_auto, h = h_forecast) 
+
+# --- 2. Kemudian jalankan baris yang error ---
+# Asumsi tahun_awal_proj sudah didefinisikan
+tahun_proyeksi_vektor <- seq(from = tahun_awal_proj, by = 5, length.out = length(kt_forecast_result$mean))
+# --- 2. Bentuk Data Frame Hasil ---
+kt_proj_df <- tibble(
+  Tahun = tahun_proyeksi_vektor,
+  # Estimasi Titik (Ramalan Rata-rata)
+  kt_Mean = as.vector(kt_forecast_result$mean),
+  # Interval Prediksi 95% (Batas Ketidakpastian)
+  Lower_95 = as.vector(kt_forecast_result$lower[, "95%"]),
+  Upper_95 = as.vector(kt_forecast_result$upper[, "95%"])
+)
+
+# --- 3. Tampilkan Hasil ---
+cat("== HASIL PROYEKSI TREN MORTALITAS (kappa_t) ==\n")
+print(kt_proj_df)
+library(ggplot2)
+library(tidyverse)
+
+# Membuat grafik garis dengan pita ketidakpastian
+
+# 1. Konversi Data Historis ke Tidy Format
+kt_hist_df <- tibble(
+  Tahun = c(1950,1955,1960,1965,1970,1975,1980,1985,1990,1995,2000,2005,2010,2015,2020),
+  kt_Mean = as.vector(kt_ts_corrected),
+  # Set Lower/Upper bounds sama dengan mean untuk garis historis yang solid
+  Lower_95 = as.vector(kt_ts_corrected),
+  Upper_95 = as.vector(kt_ts_corrected)
+)
+
+# 2. Gabungkan Data Historis dan Proyeksi
+kt_all_df <- bind_rows(kt_hist_df, kt_proj_df)
+# Data ini sekarang berisi seluruh tren dari 1971 hingga 2070.
+
+
+kt_forecast_plot <- ggplot(kt_all_df, aes(x = Tahun, y = kt_Mean)) +
+  
+  # A. Tambahkan Pita Interval Prediksi (Muncul mulus dari data historis)
+  geom_ribbon(aes(ymin = Lower_95, ymax = Upper_95), fill = "gray", alpha = 0.4) +
+  
+  # B. Garis Estimasi Rata-rata untuk seluruh periode
+  geom_line(color = "black", linewidth = 1) +
+  
+  # C. Tambahkan Garis Vertikal (Opsional: menandakan awal proyeksi)
+  geom_vline(xintercept = 2020, linetype = "dashed", color = "red") +
+  
+  # 3. Label dan Judul
+  labs(
+    title = "Tren Historis dan Proyeksi Mortalitas (κt) Jangka Panjang",
+    subtitle = "Area abu-abu menunjukkan Interval Prediksi 95%",
+    x = "Tahun",
+    y = expression(kappa[t])
+  ) +
+  
+  # 4. Penataan Tema dan Skala
+  theme_minimal(base_size = 14) +
+  scale_x_continuous(breaks = seq(min(kt_all_df$Tahun), max(kt_all_df$Tahun), by = 10)) +
+  theme(plot.title = element_text(face = "bold"))+
+  theme(
+    # KOREKSI: Tambahkan kotak luar (border)
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5) 
+  )
+
+print(kt_forecast_plot)
+```
+
+
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
